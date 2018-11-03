@@ -1,0 +1,5 @@
+pg.scm
+scheme
+tests.scm
+**/__pycache__/*
+**/__pycache__
