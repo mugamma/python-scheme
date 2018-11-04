@@ -101,6 +101,11 @@ class LiteralExpr(SymbolicExpr):
         return '{}({})'.format(self.__class__.__name__, repr(self.host_value))
 
 
+class UndefinedExpr(LiteralExpr):
+    def repr(self):
+        return ''
+
+
 class StringLiteral(LiteralExpr):
     def __init__(self, construction_token: str):
         """Create a string literal from the given token.
@@ -194,53 +199,213 @@ class CombinationExpr(LISPExpr):
     def __repr__(self):
         return '{}({})'.format(self.__class__.__name__, repr(self.subexprs))
 
+    def __getitem__(self, key):
+        return self.subexprs[key]
+
+    def __len__(self):
+        return len(self.subexprs)
+
+
 class CallExpr(CombinationExpr):
+    def eval(self, env):
+        self.perator = self[1].eval(env)
+        if not isinstance(self.operator, CallableExpr):
+            raise ValueError(type(self).__name__ + ' not callable')
+        if len(self.operator.args) != len(self) - 1:
+            raise ValueError('mismatching arguments for ' + self[1]._str)
+        if isinstance(operator, LambdaExpr):
+            return self.lambda_eval(env)
+        elif isinstance(operator, MuExpr):
+            return self.mu_eval(env)
+        return self.macro_eval(env)
+
+    def bind_and_exec(self, parent_env, call_env) -> LISPExpr:
+        """Bind the formal parameters to their values and execute the body.
+
+        parameters:
+            call_env   -- the environment in which the CallExpr was called.
+            parent_env -- the parent environment of where the body will be
+                          executed.
+        """
+        bindings =  {}
+        for formal, actual in zip(self.operator.args.subexprs, self[1:]):
+            bindings[formal._str] = actual.eval(call_env)
+        exec_env = Environment(parent_env, bindings)
+        return self.operator.body.eval(exec_env)
+
+    def lambda_eval(self, env):
+        return self.bind_and_exec(self.closure, env)
+
+    def mu_eval(self, env):
+        return self.bind_and_exec(env, env)
+
+    def macro_eval(self, env):
+        bindings =  {}
+        for formal, actual in zip(self.operator.args.subexprs, self[1:]):
+            bindings[formal._str] = actual
+        macro_body = self.body.eval(Environment(self.closure, bindings))
+        return macro_body.eval(env)
+
+
+class SpecialFormExpr(CombinationExpr):
+    def __init__(self, subexprs):
+        assert subexprs[0]._str == self.form_name
+        if len(subexprs) != self.nargs:
+            raise SyntaxError('invalid number arguments for ' + self.form_name)
+        CombinationExpr.__init__(self, subexprs)
+
+class DefineExpr(SpecialFormExpr):
+    form_name = 'define'
+    nargs = 3
+
+    def eval(self, env):
+        """Bind a name to the given value or procedure and return the name.
+
+        >>> from environment import Environment
+        >>> from parser import parse_tokens, lexer
+        >>> de = parse_tokens(lexer('(define a 2)'))[0]
+        >>> de.eval(Environment.GLOBAL)
+        Name('a')
+        >>> Environment.GLOBAL.bindings
+        {'a': IntegerLiteral(2)}
+        >>> de = parse_tokens(lexer('(define (f x) (* x 2))'))[0]
+        >>> de.eval(Environment.GLOBAL).eval(Environment.GLOBAL).repr()
+        '(lambda (x) (* x 2))'
+        """
+        if isinstance(self[1], Name):
+            name, val = self[1], self[2].eval(env)
+        else:
+            try:
+                name = self[1][0]
+                args = CombinationExpr(self[1][1:])
+                val = LambdaExpr([Name('lambda'), args, self[2]]).eval(env)
+            except: raise SyntaxError('bad procedure definition')
+        env.bind(name, val)
+        return name
+
+
+class IfExpr(SpecialFormExpr):
+    form_name = 'if'
+    nargs = 4
+
+    def __init__(self, subexprs):
+        if len(subexprs) == 3:
+            subexprs += [UndefinedExpr()]
+        SpecialFormExpr.__init__(self, subexprs)
+        self.predicate, self.consequent, self.alternative = self.subexprs[1:]
+
+    def eval(self, env):
+        if self.predicate.eval(env) != BooleanLiteral('#f'):
+            return self.consequent.eval(env)
+        return self.alternative.eval(env)
+
+
+class AndExpr(SpecialFormExpr):
     pass
 
-class DefineExpr(CombinationExpr):
+class OrExpr(SpecialFormExpr):
     pass
 
-class IfExpr(CombinationExpr):
+class LetExpr(SpecialFormExpr):
     pass
 
-class AndExpr(CombinationExpr):
+class BeginExpr(SpecialFormExpr):
     pass
 
-class OrExpr(CombinationExpr):
+class CallableExpr(SpecialFormExpr):
+    nargs = 3
+    def __init__(self, subexprs):
+        SpecialFormExpr.__init__(self, subexprs)
+        self.args, self.body = self[1], self[2]
+
+    def eval(self, env):
+        return self
+
+
+class LambdaExpr(CallableExpr):
+    form_name = 'lambda'
+
+    def eval(self, env):
+        self.closure = env
+        return self
+
+
+class MuExpr(CallableExpr):
+    form_name = 'mu'
+
+
+class DefineMacroExpr(CallableExpr):
+    form_name = 'define-macro'
+
+    def eval(self, env):
+        self.closure = env
+        return self
+
+
+class QuoteExpr(SpecialFormExpr):
+    form_name = 'quote'
+    nargs = 2
+
+    def eval(self, env):
+        """
+        >>> import parser
+        >>> from environment import Environment
+        >>> qe = parser.parse_tokens(parser.lexer("'(* x 2)"))[0]
+        >>> qe.eval(Environment.GLOBAL).repr()
+        '(* x 2)'
+        """
+        return self[1]
+
+
+class DelayExpr(SpecialFormExpr):
     pass
 
-class LetExpr(CombinationExpr):
+class ConsStreamExpr(SpecialFormExpr):
     pass
 
-class BeginExpr(CombinationExpr):
+class QuasiQuoteExpr(SpecialFormExpr):
+    form_name = 'quasiquote'
+    nargs = 2
+
+    def eval(self, env):
+        """
+        >>> import parser
+        >>> from environment import Environment
+        >>> e1 = parser.parse_tokens(parser.lexer('(define a  2)'))[0]
+        >>> e2 = parser.parse_tokens(parser.lexer('(define b  3)'))[0]
+        >>> e3 = parser.parse_tokens(parser.lexer(',a'))[0]
+        >>> e1.eval(Environment.GLOBAL)
+        Name('a')
+        >>> e2.eval(Environment.GLOBAL)
+        Name('b')
+        >>> e3.eval(Environment.GLOBAL)
+        IntegerLiteral(2)
+        >>> e4 = parser.parse_tokens(parser.lexer(
+        ...     '`(a b ,a ,b (a ,a) (b ,b))'))[0]
+        >>> e4.eval(Environment.GLOBAL).repr()
+        '(a b 2 3 (a 2) (b 3))'
+        """
+        def partial_unquote(expr):
+            if not isinstance(expr, CombinationExpr):
+                return expr
+            if isinstance(expr.sift(), UnquoteExpr):
+                return expr.eval(env)
+            return CombinationExpr([partial_unquote(e) for e in expr.subexprs])
+        return partial_unquote(self[1])
+
+
+class SetExpr(SpecialFormExpr):
     pass
 
-class LambdaExpr(CombinationExpr):
+
+class UnquoteExpr(SpecialFormExpr):
+    form_name = 'unquote'
+    nargs = 2
+
+    def eval(self, env):
+        return self[1].eval(env)
+
+
+class UnquoteSplicingExpr(SpecialFormExpr):
     pass
 
-class MuExpr(CombinationExpr):
-    pass
-
-class QuoteExpr(CombinationExpr):
-    pass
-
-class DelayExpr(CombinationExpr):
-    pass
-
-class ConsStreamExpr(CombinationExpr):
-    pass
-
-class QuasiQuoteExpr(CombinationExpr):
-    pass
-
-class SetExpr(CombinationExpr):
-    pass
-
-class UnquoteExpr(CombinationExpr):
-    pass
-
-class UnquoteSplicingExpr(CombinationExpr):
-    pass
-
-class DefineMacroExpr(CombinationExpr):
-    pass
