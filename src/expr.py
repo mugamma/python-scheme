@@ -1,4 +1,5 @@
-from typing import List
+from typing import List, Callable
+import environment
 
 class LISPExpr:
     """A LISP expression is a LISP list or a single symbol."""
@@ -102,8 +103,14 @@ class LiteralExpr(SymbolicExpr):
 
 
 class UndefinedExpr(LiteralExpr):
+    def __init__(self):
+        pass
+
     def repr(self):
-        return ''
+        return 'undefined'
+
+    def __repr__(self):
+        return 'UndefinedExpr()'
 
 
 class StringLiteral(LiteralExpr):
@@ -130,6 +137,9 @@ class BooleanLiteral(LiteralExpr):
 
     def __repr__(self):
         return 'BooleanLiteral(' +("'#t'" if self.host_value else "'#f'") +')'
+
+    def __eq__(self, other):
+        return isinstance(other, BooleanLiteral) and other.host_value == self.host_value
 
 
 class NumericLiteral(LiteralExpr):
@@ -183,7 +193,7 @@ class CombinationExpr(LISPExpr):
                       'let': LetExpr,
                       'begin': BeginExpr, 
                       'lambda': LambdaExpr,
-                      'Mu': MuExpr,
+                      'mu': MuExpr,
                       'quote': QuoteExpr,
                       'cons-stream': ConsStreamExpr,
                       'set!': SetExpr, 
@@ -208,15 +218,18 @@ class CombinationExpr(LISPExpr):
 
 class CallExpr(CombinationExpr):
     def eval(self, env):
-        self.perator = self[1].eval(env)
+        self.operator = self[0].eval(env)
         if not isinstance(self.operator, CallableExpr):
             raise ValueError(type(self).__name__ + ' not callable')
-        if len(self.operator.args) != len(self) - 1:
-            raise ValueError('mismatching arguments for ' + self[1]._str)
-        if isinstance(operator, LambdaExpr):
+        ### XXX arity check to be implemented
+        # if len(self.operator.args) != len(self) - 1:
+        #    raise ValueError('mismatching arguments for ' + self[1]._str)
+        if isinstance(self.operator, LambdaExpr):
             return self.lambda_eval(env)
-        elif isinstance(operator, MuExpr):
+        elif isinstance(self.operator, MuExpr):
             return self.mu_eval(env)
+        elif isinstance(self.operator, BuiltinProcedure):
+            return self.builtin_eval(env)
         return self.macro_eval(env)
 
     def bind_and_exec(self, parent_env, call_env) -> LISPExpr:
@@ -230,11 +243,11 @@ class CallExpr(CombinationExpr):
         bindings =  {}
         for formal, actual in zip(self.operator.args.subexprs, self[1:]):
             bindings[formal._str] = actual.eval(call_env)
-        exec_env = Environment(parent_env, bindings)
+        exec_env = environment.Environment(parent_env, bindings)
         return self.operator.body.eval(exec_env)
 
     def lambda_eval(self, env):
-        return self.bind_and_exec(self.closure, env)
+        return self.bind_and_exec(self.operator.closure, env)
 
     def mu_eval(self, env):
         return self.bind_and_exec(env, env)
@@ -243,8 +256,12 @@ class CallExpr(CombinationExpr):
         bindings =  {}
         for formal, actual in zip(self.operator.args.subexprs, self[1:]):
             bindings[formal._str] = actual
-        macro_body = self.body.eval(Environment(self.closure, bindings))
+        body_env = environment.Environment(self.operator.closure, bindings)
+        macro_body = self.body.eval(body_env)
         return macro_body.eval(env)
+
+    def builtin_eval(self, env):
+        return self.operator.execute([arg.eval(env) for arg in self[1:]], env)
 
 
 class SpecialFormExpr(CombinationExpr):
@@ -295,6 +312,16 @@ class IfExpr(SpecialFormExpr):
         self.predicate, self.consequent, self.alternative = self.subexprs[1:]
 
     def eval(self, env):
+        """
+        >>> from parser import lexer, parse_tokens
+        >>> from environment import Environment
+        >>> import builtin
+        >>> builtin.bind_builtins(Environment.GLOBAL)
+        >>> parse_tokens(lexer("(if (< 3 2) 'wrong 'right)"))[0].eval(Environment.GLOBAL)
+        Name('right')
+        >>> parse_tokens(lexer("(if (< 2 3) 'right 'wrong)"))[0].eval(Environment.GLOBAL)
+        Name('right')
+        """
         if self.predicate.eval(env) != BooleanLiteral('#f'):
             return self.consequent.eval(env)
         return self.alternative.eval(env)
@@ -341,6 +368,20 @@ class DefineMacroExpr(CallableExpr):
         self.closure = env
         return self
 
+
+class BuiltinProcedure(CallableExpr):
+
+    def __init__(self,
+            default_name: Name,
+            execute: Callable[[List[LISPExpr], 'Environment'], LISPExpr]):
+        self.default_name = default_name
+        self.execute = execute
+    
+    def repr(self):
+        return '#[{}]'.format(self.default_name)
+
+    def __repr__(self):
+        return 'BuiltinProcedure({})'.format(self.default_name._str)
 
 class QuoteExpr(SpecialFormExpr):
     form_name = 'quote'

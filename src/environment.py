@@ -1,4 +1,4 @@
-from expr import Name, LISPExpr
+import expr
 
 class Environment:
     """An execution environment"""
@@ -8,13 +8,13 @@ class Environment:
 
         Attributes:
           bindings -- a dictionary of str -> expr.LISPExpr
-          parent   -- another environment
+          parent   -- another environment or None for the global environment
         """
         self.bindings = bindings
         self.parent = parent
 
-    def bind(self, name: Name, value: LISPExpr):
-        if not isinstance(name, Name):
+    def bind(self, name: 'expr.Name', value: 'expr.LISPExpr'):
+        if not isinstance(name, expr.Name):
             raise ValueError('cannot bind value to non-name.')
         self.bindings[name._str] = value
 
